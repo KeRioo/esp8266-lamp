@@ -7,11 +7,11 @@
 
 
 // WIFI credentials
-#define WIFI_SSID "SSID"
-#define WIFI_PASSWORD "KEY"
+#define WIFI_SSID 
+#define WIFI_PASSWORD 
 
 // MQTT broker address
-#define MQTT_HOST "broker-address.here" // URL or IPAddress(10, 0, 0, 100)
+#define MQTT_HOST IPAddress(192, 168, 1, 201) // URL or IPAddress(10, 0, 0, 100)
 #define MQTT_PORT 1883
 
 // #define MQTT_AUTH // Uncoment if you want use login/pass
@@ -25,14 +25,17 @@
 const String client_id = String(ESP.getChipId(), HEX);
 
 // Topics
+const String prefix = "/home/desk-lamp/";
+const String light_set_topic = prefix + client_id + "/setRGB";
+const String light_get_topic = prefix + client_id + "/getRGB";
+const String light_set_topic_all = prefix + "all/setRGB";
 
-const String light_set_topic = "/home/desk-lamp/" + client_id + "/setRGB";
-const String light_get_topic = "/home/desk-lamp/" + client_id + "/getRGB";
-const String light_set_topic_all = "/home/desk-lamp/all/setRGB";
+const String rainbow_topic = prefix + client_id + "/rainbow";
+const String rainbow_topic_all = prefix + "all/rainbow";
 
-const String brightness_set_topic = "/home/desk-lamp/" + client_id + "/setBrightness";
-const String brightness_get_topic = "/home/desk-lamp/" + client_id + "/getBrightness";
-const String brightness_set_topic_all = "/home/desk-lamp/all/setBrightness";
+const String brightness_set_topic = prefix + client_id + "/setBrightness";
+const String brightness_get_topic = prefix + client_id + "/getBrightness";
+const String brightness_set_topic_all = prefix + "all/setBrightness";
 
 
 // Code
@@ -49,74 +52,86 @@ Ticker fader;
 Adafruit_NeoPixel pixels(NUM_LEDS, DATA_PIN, NEO_GRB + NEO_KHZ800);
 
 // Init globals
-float current[3] = {0,0,0};
-float delta[3] = {0,0,0};
-float step[3] = {0,0,0};
-int target[3] = {0,0,0};
+float current [NUM_LEDS][3];
+float delta [NUM_LEDS][3];
+int target [NUM_LEDS][3];
 byte brightness = 50;
 int fadeCounter = 0;
+long rainbowCounter = 0;
+
+byte state = 1; // 0 => off,  1 => RGB,  2 => rainbow
 
 char buff[50];
-  
 
-void setColor(byte red, byte green, byte blue) {
+void setColor() {
   for(int i=0; i<NUM_LEDS; i++) {
-    pixels.setPixelColor(i, pixels.Color(red, green, blue));
+    pixels.setPixelColor(i, pixels.Color(
+      int(current[i][0]), int(current[i][1]), int(current[i][2])
+    ));
   }
   pixels.show();
 }
 
-float calculateDelta(int prevValue, int endValue) {
-    float delta = endValue - prevValue;
-    if (delta) {                      
-        delta = delta/30;            
-    }
-    Serial.println(delta);
-    return delta;
+void setColor(byte R, byte G, byte B) {
+  for(int i=0; i<NUM_LEDS; i++) {
+    pixels.setPixelColor(i, pixels.Color(R, G, B));
+  }
+  pixels.show();
 }
 
-float calculateVal(float delta, float val) {
-    float foo;
-    foo = val + (float) delta;
-    
-    if (foo > 255) {
-        foo = 255;
+void calculateDelta() {
+  for(int i = 0; i < NUM_LEDS; i++) {
+    for(byte j=0; j < 3; j++){
+      float foo = target[i][j] - current[i][j];
+      if (foo) { foo = foo/30; }
+      delta[i][j] = foo;
     }
-    else if (foo < 0) {
-        foo = 0;
-    }
-    Serial.print(foo);
-    return foo;
-}
-
-void handleFade() {
-  if(fadeCounter < 30 + 1) {
-    fadeCounter++;
-    current[0] = calculateVal(delta[0], current[0]);
-    current[1] = calculateVal(delta[1], current[1]);
-    current[2] = calculateVal(delta[2], current[2]);
-
-    setColor(int(current[0]),int(current[1]),int(current[2]));
-  } else {
-    fader.detach();
-    fadeCounter = 1;
   }
 }
 
-void startFade(byte red, byte green, byte blue) {
-  fader.detach();
-  target[0] = red;
-  target[1] = green;
-  target[2] = blue;
-
-  delta[0] = calculateDelta(current[0], target[0]);
-  delta[1] = calculateDelta(current[1], target[1]);
-  delta[2] = calculateDelta(current[2], target[2]);
-  
-  fadeCounter = 1;
-  fader.attach(0.02, handleFade);
+void calculateVal() {
+  for(int i = 0; i < NUM_LEDS; i++) {
+    for(byte j=0; j < 3; j++) {
+      float foo = current[i][j] + delta[i][j];
+      if (foo > 255)    { foo = 255; }
+      else if (foo < 0) { foo = 0;   }
+      current[i][j] = foo;
+    }
+  }
 }
 
+void handleFade() {
+  
+  switch (state) {
+  case 0:
+    setColor(0,0,0);
+    fader.detach();
+    break;
+  
+  case 1:
+    if(fadeCounter < 30) {
+      fadeCounter++;
+      calculateVal();
+      setColor();
+    } else {
+      fader.detach();
+      fadeCounter = 0;
+    }
+    break;
+  case 2:
+    if (rainbowCounter == 65535) {
+      rainbowCounter = 0;
+    }
+    for(int i=0; i<pixels.numPixels(); i++) { 
+      int pixelHue = rainbowCounter + (i * 65536L / pixels.numPixels());
+      pixels.setPixelColor(i, pixels.gamma32(pixels.ColorHSV(pixelHue)));  
+    }
+    pixels.show();
+    rainbowCounter+= 256;
+    break;
+  }
+  
+}
 
 // AsyncMqttClient 
 void connectToWifi() {
@@ -147,9 +162,12 @@ void onMqttConnect(bool sessionPresent) {
   Serial.println(sessionPresent);
   
   mqttClient.subscribe(light_set_topic.c_str(), 2);
-  mqttClient.subscribe(light_set_topic_all.c_str(), 2);
   mqttClient.subscribe(brightness_set_topic.c_str(), 2);
+  mqttClient.subscribe(rainbow_topic.c_str(), 2);
+
+  mqttClient.subscribe(light_set_topic_all.c_str(), 2);
   mqttClient.subscribe(brightness_set_topic_all.c_str(), 2);
+  mqttClient.subscribe(rainbow_topic_all.c_str(), 2);
 
   sprintf(buff,"#%02X%02X%02X", (int)current[0], (int)current[1], (int)current[2]);
   mqttClient.publish(light_get_topic.c_str(), 2, true, buff);
@@ -215,8 +233,25 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
     byte green = number >> 8 & 0xFF;
     byte blue = number & 0xFF;
     
-    startFade(red, green, blue);
+    for(int i = 0; i < NUM_LEDS; i++) {
+      target[i][0] = red;
+      target[i][1] = green;
+      target[i][2] = blue;
+    }
+    fader.detach();
+
+    calculateDelta();
+    state = 1;
+    fadeCounter = 0;
+    fader.attach(0.02, handleFade);
   }
+
+  if (strcmp(topic, rainbow_topic.c_str())==0 || strcmp(topic, rainbow_topic_all.c_str())==0) {
+    fader.detach();
+    state = 2;
+    fader.attach(0.02, handleFade);
+  }
+
 
   if (strcmp(topic, brightness_set_topic.c_str())==0 || strcmp(topic, brightness_set_topic_all.c_str())==0) {
     msg = (byte)msg.toInt();
@@ -224,7 +259,7 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
       brightness = (byte)msg.toInt();
 
       pixels.setBrightness(brightness);
-      setColor(current[0], current[1], current[2]);
+      setColor();
         
       mqttClient.publish(brightness_get_topic.c_str(), 2, true, msg.c_str());
     }
@@ -238,6 +273,19 @@ void onMqttPublish(uint16_t packetId) {
 }
 
 void setup() {
+ 
+  for(int i = 0; i < NUM_LEDS; i++) {
+    current[i][0] = 0;
+    current[i][1] = 0;
+    current[i][2] = 0;
+    delta[i][0] = 0;
+    delta[i][1] = 0;
+    delta[i][2] = 0;
+    target[i][0] = 0;
+    target[i][1] = 0;
+    target[i][2] = 0;
+  }
+
   Serial.begin(115200);
   Serial.println();
 
