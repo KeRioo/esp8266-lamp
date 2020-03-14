@@ -7,8 +7,8 @@
 
 
 // WIFI credentials
-#define WIFI_SSID 
-#define WIFI_PASSWORD 
+#define WIFI_SSID "test"
+#define WIFI_PASSWORD "test"
 
 // MQTT broker address
 #define MQTT_HOST IPAddress(192, 168, 1, 201) // URL or IPAddress(10, 0, 0, 100)
@@ -58,8 +58,8 @@ int target [NUM_LEDS][3];
 byte brightness = 50;
 int fadeCounter = 0;
 long rainbowCounter = 0;
-
-byte state = 1; // 0 => off,  1 => RGB,  2 => rainbow
+byte pre_state = 0; 
+byte state = 0; // 0 => off,  1 => fade,  2 => rainbow
 
 char buff[50];
 
@@ -101,8 +101,17 @@ void calculateVal() {
 }
 
 void handleFade() {
-  
-  switch (state) {
+  byte s;
+  if (pre_state) { 
+    if (fadeCounter == 30) {
+      pre_state = 0;
+      s = state;
+    }
+    s = pre_state;
+  }
+  else { s = state; }
+
+  switch (s) {
   case 0:
     setColor(0,0,0);
     fader.detach();
@@ -124,9 +133,14 @@ void handleFade() {
     }
     for(int i=0; i<pixels.numPixels(); i++) { 
       int pixelHue = rainbowCounter + (i * 65536L / pixels.numPixels());
-      pixels.setPixelColor(i, pixels.gamma32(pixels.ColorHSV(pixelHue)));  
+      uint32_t c = pixels.gamma32(pixels.ColorHSV(pixelHue));
+
+      current[i][0] = (uint8_t)(c >> 16),
+      current[i][1] = (uint8_t)(c >>  8),
+      current[i][2] = (uint8_t)c;
+
+      setColor();
     }
-    pixels.show();
     rainbowCounter+= 256;
     break;
   }
@@ -248,6 +262,16 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
 
   if (strcmp(topic, rainbow_topic.c_str())==0 || strcmp(topic, rainbow_topic_all.c_str())==0) {
     fader.detach();
+
+    for(int i=0; i<pixels.numPixels(); i++) { 
+      uint32_t c = pixels.gamma32(pixels.ColorHSV(i * 65536L / pixels.numPixels()));
+
+      target[i][0] = (uint8_t)(c >> 16),
+      target[i][1] = (uint8_t)(c >>  8),
+      target[i][2] = (uint8_t)c;
+    }
+    
+    pre_state = 1;
     state = 2;
     fader.attach(0.02, handleFade);
   }
